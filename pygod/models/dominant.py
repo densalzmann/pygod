@@ -3,6 +3,7 @@
 # Author: Kay Liu <zliu234@uic.edu>
 # License: BSD 2 clause
 
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -15,6 +16,7 @@ from . import BaseDetector
 from .basic_nn import GCN
 from ..utils import validate_device
 from ..metrics import eval_roc_auc
+import mlflow
 
 
 class DOMINANT(BaseDetector):
@@ -81,6 +83,7 @@ class DOMINANT(BaseDetector):
                  act=F.relu,
                  alpha=None,
                  contamination=0.1,
+                 mlflow_run_id=None,
                  lr=5e-3,
                  epoch=5,
                  gpu=0,
@@ -107,8 +110,11 @@ class DOMINANT(BaseDetector):
         # other param
         self.verbose = verbose
         self.model = None
+        self.mlflow_run_id = mlflow_run_id
+        self.last_epoch_loss = -1
+        self.first_epoch_loss = -1
 
-    def fit(self, G, y_true=None):
+    def fit(self, G, y_true=None, eval_G=None):
         """
         Fit detector with input data.
 
@@ -166,24 +172,84 @@ class DOMINANT(BaseDetector):
                                        s_[:batch_size])
                 decision_scores[node_idx[:batch_size]] = score.detach() \
                     .cpu().numpy()
-                loss = torch.mean(score)
+                loss = torch.mean(score)                
                 epoch_loss += loss.item() * batch_size
 
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+            
+            ## Evaluation loss
+            eval_epoch_loss = -1
+            if eval_G != None:
+                eval_epoch_loss = self.evaluating_function(eval_G)
 
             if self.verbose:
                 print("Epoch {:04d}: Loss {:.4f}"
                       .format(epoch, epoch_loss / G.x.shape[0]), end='')
+                with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                    mlflow.log_metric(key="epoch_loss", value=epoch_loss/G.x.shape[0], step=epoch)
+                    if eval_epoch_loss != 1:
+                        mlflow.log_metric(key="eval_epoch_loss", value=eval_epoch_loss, step=epoch)
+
                 if y_true is not None:
                     auc = eval_roc_auc(y_true, decision_scores)
                     print(" | AUC {:.4f}".format(auc), end='')
+                    with mlflow.start_run(run_id = self.mlflow_run_id):
+                        mlflow.log_metric(key="auc", value= auc, step=epoch)
                 print()
-
+            
+            if epoch == 0:
+                self.first_epoch_loss = epoch_loss/G.x.shape[0]
+            self.last_epoch_loss=epoch_loss/G.x.shape[0]
         self.decision_scores_ = decision_scores
         self._process_decision_scores()
         return self
+
+    def evaluating_function(self, eval_G):
+        """
+        Evaluating function
+
+        Parameters
+        ----------
+        eval_G : PyTorch Geometric Data instance (torch_geometric.data.Data)
+            The input data.
+
+        Returns
+        -------
+        eval_epoch_loss_avg : float
+            The evaluation epoch loss.
+        """
+        check_is_fitted(self, ['model'])
+        eval_G.node_idx = torch.arange(eval_G.x.shape[0])
+        eval_G.s = to_dense_adj(eval_G.edge_index)[0]
+
+        loader = NeighborLoader(eval_G,
+                                [self.num_neigh] * self.num_layers,
+                                batch_size=self.batch_size)
+
+        self.model.eval()
+        eval_epoch_loss = 0
+        for sampled_data in loader:
+            batch_size = sampled_data.batch_size
+            node_idx = sampled_data.node_idx
+
+            x, s, edge_index = self.process_graph(sampled_data)
+
+            x_, s_ = self.model(x, edge_index)
+            score = self.loss_func(x[:batch_size],
+                                   x_[:batch_size],
+                                   s[:batch_size, node_idx],
+                                   s_[:batch_size])
+            
+            eval_loss = torch.mean(score)                
+            eval_epoch_loss += eval_loss.item() * batch_size
+
+        self.model.train()
+        eval_epoch_loss_avg = eval_epoch_loss/eval_G.x.shape[0]
+        print('Evaluation Loss: ',eval_epoch_loss_avg)
+
+        return eval_epoch_loss_avg
 
     def decision_function(self, G):
         """

@@ -21,6 +21,7 @@ from . import BaseDetector
 from .basic_nn import Vanilla_GCN as GCN
 from ..utils import validate_device
 from ..metrics import eval_roc_auc
+import mlflow
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
@@ -91,6 +92,7 @@ class CoLA(BaseDetector):
                  subgraph_size=4,
                  contamination=0.1,
                  gpu=0,
+                 mlflow_run_id=None,
                  verbose=False):
         super(CoLA, self).__init__(contamination=contamination)
 
@@ -106,6 +108,8 @@ class CoLA(BaseDetector):
 
         self.verbose = verbose
         self.model = None
+        self.mlflow_run_id = mlflow_run_id
+        self.last_epoch_loss = -1
 
     def fit(self, G, y_true=None):
         """
@@ -193,11 +197,17 @@ class CoLA(BaseDetector):
             if self.verbose:
                 print("Epoch {:04d}: Loss {:.4f}"
                       .format(epoch, epoch_loss / G.x.shape[0]), end='')
+                with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                    mlflow.log_metric(key="epoch_loss", value=epoch_loss/G.x.shape[0], step=epoch)
+
                 if y_true is not None:
                     auc = eval_roc_auc(y_true, decision_scores)
                     print(" | AUC {:.4f}".format(auc), end='')
+                    with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                        mlflow.log_metric(key="auc", value= auc, step=epoch)
                 print()
-
+                
+            self.last_epoch_loss=epoch_loss/G.x.shape[0]
         ano_score_final = np.mean(multi_epoch_ano_score, axis=0)
 
         self.decision_scores_ = ano_score_final

@@ -16,6 +16,7 @@ from sklearn.utils.validation import check_is_fitted
 from . import BaseDetector
 from ..utils import validate_device
 from ..metrics import eval_roc_auc
+import mlflow
 
 
 class AnomalyDAE(BaseDetector):
@@ -99,6 +100,7 @@ class AnomalyDAE(BaseDetector):
                  gpu=0,
                  batch_size=0,
                  num_neigh=-1,
+                 mlflow_run_id=None,
                  verbose=False):
         super(AnomalyDAE, self).__init__(contamination=contamination)
 
@@ -122,8 +124,10 @@ class AnomalyDAE(BaseDetector):
         # other param
         self.verbose = verbose
         self.model = None
+        self.mlflow_run_id = mlflow_run_id
+        self.last_epoch_loss = -1
 
-    def fit(self, G, y_true=None):
+    def fit(self, G, y_true=None, eval_G=None):
         """
         Fit detector with input data.
 
@@ -144,10 +148,16 @@ class AnomalyDAE(BaseDetector):
         G.node_idx = torch.arange(G.x.shape[0])
         G.s = to_dense_adj(G.edge_index)[0]
 
+        # ## TODO
+        # G.x = G.x.to_dense()
+
         # automated balancing by std
         if self.alpha is None:
             self.alpha = torch.std(G.s).detach() / \
                          (torch.std(G.x).detach() + torch.std(G.s).detach())
+
+        # ## TODO
+        # G.x = G.x.to_sparse()
 
         if self.batch_size == 0:
             self.batch_size = G.x.shape[0]
@@ -176,10 +186,15 @@ class AnomalyDAE(BaseDetector):
                 x, s, edge_index = self.process_graph(sampled_data)
 
                 x_, s_ = self.model(x, edge_index, batch_size)
+
+                # ## TODO
+                # x = x.to_dense()
                 score = self.loss_func(x[:batch_size],
                                        x_[:batch_size],
                                        s[:batch_size, node_idx],
                                        s_[:batch_size])
+                # ## TODO
+                # x = x.to_sparse()
                 decision_scores[node_idx[:batch_size]] = score.detach() \
                     .cpu().numpy()
                 loss = torch.mean(score)
@@ -188,18 +203,77 @@ class AnomalyDAE(BaseDetector):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+            
+            ## Evaluation loss
+            eval_epoch_loss = -1
+            if eval_G != None:
+                eval_epoch_loss = self.evaluating_function(eval_G)   
 
             if self.verbose:
                 print("Epoch {:04d}: Loss {:.4f}"
                       .format(epoch, epoch_loss / G.x.shape[0]), end='')
+                with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                    mlflow.log_metric(key="epoch_loss", value=epoch_loss/G.x.shape[0], step=epoch)
+                    if eval_epoch_loss != 1:
+                        mlflow.log_metric(key="eval_epoch_loss", value=eval_epoch_loss, step=epoch)
+
                 if y_true is not None:
                     auc = eval_roc_auc(y_true, decision_scores)
                     print(" | AUC {:.4f}".format(auc), end='')
+                    with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                        mlflow.log_metric(key="auc", value= auc, step=epoch)
                 print()
 
+            self.last_epoch_loss=epoch_loss/G.x.shape[0]
         self.decision_scores_ = decision_scores
         self._process_decision_scores()
         return self
+
+    def evaluating_function(self, G):
+        """
+        Evaluating function
+
+        Parameters
+        ----------
+        eval_G : PyTorch Geometric Data instance (torch_geometric.data.Data)
+            The input data.
+
+        Returns
+        -------
+        eval_epoch_loss_avg : float
+            The evaluation epoch loss.
+        """
+        check_is_fitted(self, ['model'])
+        G.node_idx = torch.arange(G.x.shape[0])
+        G.s = to_dense_adj(G.edge_index)[0]
+
+        loader = NeighborLoader(G,
+                                [self.num_neigh],
+                                batch_size=self.batch_size)
+
+        self.model.eval()
+        eval_epoch_loss = 0
+        for sampled_data in loader:
+            batch_size = sampled_data.batch_size
+            node_idx = sampled_data.node_idx
+
+            x, s, edge_index = self.process_graph(sampled_data)
+
+            x_, s_ = self.model(x, edge_index, batch_size)
+            score = self.loss_func(x[:batch_size],
+                                   x_[:batch_size],
+                                   s[:batch_size, node_idx],
+                                   s_[:batch_size])
+            
+            eval_loss = torch.mean(score)                
+            eval_epoch_loss += eval_loss.item() * batch_size
+
+        self.model.train()
+        eval_epoch_loss_avg = eval_epoch_loss/G.x.shape[0]
+        print('Evaluation Loss: ',eval_epoch_loss_avg)
+
+        return eval_epoch_loss_avg
+
 
     def decision_function(self, G):
         """
