@@ -3,6 +3,7 @@ import torch
 import argparse
 import warnings
 from pygod.metrics import *
+from pygod.utils.utility import load_data
 from utils import init_model
 
 
@@ -11,7 +12,7 @@ def main(args):
 
     for _ in tqdm.tqdm(range(num_trial)):
         model = init_model(args)
-        data = torch.load('data/' + args.dataset + '.pt')
+        data = load_data(args.dataset)
 
         if args.model == 'if' or args.model == 'lof':
             model.fit(data.x)
@@ -52,7 +53,8 @@ if __name__ == '__main__':
                         help="GPU Index. Default: -1, using CPU.")
     parser.add_argument("--dataset", type=str, default='inj_cora',
                         help="supported dataset: [inj_cora, inj_amazon, "
-                             "inj_flickr, weibo, reddit]. Default: inj_cora")
+                             "inj_flickr, weibo, reddit, disney, books, "
+                             "enron]. Default: inj_cora")
     args = parser.parse_args()
 
     # global setting
