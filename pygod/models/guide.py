@@ -22,7 +22,7 @@ from . import BaseDetector
 from .basic_nn import GCN
 from ..utils import validate_device
 from ..metrics import eval_roc_auc
-
+import mlflow
 
 class GUIDE(BaseDetector):
     """
@@ -111,6 +111,7 @@ class GUIDE(BaseDetector):
                  graphlet_size=4,
                  selected_motif=True,
                  cache_dir=None,
+                 mlflow_run_id=None,
                  verbose=False):
         super(GUIDE, self).__init__(contamination=contamination)
 
@@ -142,6 +143,8 @@ class GUIDE(BaseDetector):
         if cache_dir is None:
             cache_dir = os.path.join(os.path.expanduser('~'), '.pygod')
         self.cache_dir = cache_dir
+        self.mlflow_run_id = mlflow_run_id
+        self.last_epoch_loss = -1
 
     def fit(self, G, y_true=None):
         """
@@ -213,11 +216,17 @@ class GUIDE(BaseDetector):
             if self.verbose:
                 print("Epoch {:04d}: Loss {:.4f}"
                       .format(epoch, epoch_loss / G.x.shape[0]), end='')
+                with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                    mlflow.log_metric(key="epoch_loss", value=epoch_loss/G.x.shape[0], step=epoch)
+
                 if y_true is not None:
                     auc = eval_roc_auc(y_true, decision_scores)
                     print(" | AUC {:.4f}".format(auc), end='')
+                    with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                        mlflow.log_metric(key="auc", value= auc, step=epoch)
                 print()
-
+                
+            self.last_epoch_loss=epoch_loss/G.x.shape[0]
         self.decision_scores_ = decision_scores
         self._process_decision_scores()
         return self

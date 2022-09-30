@@ -16,6 +16,7 @@ from torch_geometric.utils import to_dense_adj
 from torch_cluster import random_walk
 
 from . import BaseDetector
+import mlflow
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
@@ -142,6 +143,7 @@ class ANEMONE(BaseDetector):
                  negsamp_ratio_context=1,
                  auc_test_rounds=256,
                  contamination=0.1,
+                 mlflow_run_id=None,
                  gpu=0):
         super(ANEMONE, self).__init__(contamination=contamination)
 
@@ -181,6 +183,8 @@ class ANEMONE(BaseDetector):
 
         self.verbose = verbose
         self.model = None
+        self.mlflow_run_id = mlflow_run_id
+        self.last_epoch_loss = -1
 
     def fit(self, G):
         """

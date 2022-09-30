@@ -71,6 +71,23 @@ class BaseDetector(object):
         """
         pass
 
+
+    def evaluating_function(self, eval_G):
+        """
+        Evaluating function
+
+        Parameters
+        ----------
+        eval_G : PyTorch Geometric Data instance (torch_geometric.data.Data)
+            The input data.
+
+        Returns
+        -------
+        eval_epoch_loss : float
+            The anomaly score of shape :math:`N`.
+        """
+        pass
+    
     def decision_function(self, G):
         """Predict raw anomaly scores of PyG Graph G using the fitted detector.
         The anomaly score of an input sample is computed based on the fitted

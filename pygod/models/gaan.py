@@ -16,6 +16,7 @@ from .basic_nn import MLP
 from . import BaseDetector
 from ..utils import validate_device
 from ..metrics import eval_roc_auc
+import mlflow
 
 
 class GAAN(BaseDetector):
@@ -92,6 +93,7 @@ class GAAN(BaseDetector):
                  gpu=0,
                  batch_size=0,
                  num_neigh=-1,
+                 mlflow_run_id=None,
                  verbose=False):
         super(GAAN, self).__init__(contamination=contamination)
 
@@ -115,8 +117,10 @@ class GAAN(BaseDetector):
         # other param
         self.verbose = verbose
         self.model = None
+        self.mlflow_run_id = mlflow_run_id
+        self.last_epoch_loss = -1
 
-    def fit(self, G, y_true=None):
+    def fit(self, G, y_true=None, eval_G=None):
         """
         Fit detector with input data.
 
@@ -204,19 +208,83 @@ class GAAN(BaseDetector):
                 decision_scores[node_idx[:batch_size]] = score.detach() \
                     .cpu().numpy()
 
+            # Evaluation loss
+            eval_epoch_loss = -1
+            if eval_G != None:
+                eval_epoch_loss = self.evaluating_function(eval_G)
+
             if self.verbose:
                 print("Epoch {:04d}: Loss G {:.4f} | Loss ED {:4f}"
                       .format(epoch, epoch_loss_g / G.x.shape[0],
                               epoch_loss_ed / G.x.shape[0]), end='')
+                with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                    mlflow.log_metric(key="epoch_loss_g", value=epoch_loss_g/G.x.shape[0], step=epoch)
+                with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                    mlflow.log_metric(key="epoch_loss_ed", value=epoch_loss_ed/G.x.shape[0], step=epoch)
+                    if eval_epoch_loss != 1:
+                        mlflow.log_metric(key="eval_epoch_loss", value=eval_epoch_loss, step=epoch)
                 if y_true is not None:
                     auc = eval_roc_auc(y_true, decision_scores)
                     print(" | AUC {:.4f}".format(auc), end='')
                 print()
 
+            self.last_epoch_loss=epoch_loss_ed/G.x.shape[0]
         self.decision_scores_ = decision_scores
         self._process_decision_scores()
 
         return self
+
+    def evaluating_function(self, G):
+        """
+        Evaluating function
+
+        Parameters
+        ----------
+        eval_G : PyTorch Geometric Data instance (torch_geometric.data.Data)
+            The input data.
+
+        Returns
+        -------
+        eval_epoch_loss_avg : float
+            The evaluation epoch loss.
+        """
+        check_is_fitted(self, ['model'])
+        G.node_idx = torch.arange(G.x.shape[0])
+        if self.batch_size == 0:
+            self.batch_size = G.x.shape[0]
+        loader = NeighborLoader(G,
+                                [self.num_neigh],
+                                batch_size=self.batch_size)
+        
+        self.model.eval()
+        eval_epoch_loss = 0
+        for sampled_data in loader:
+            batch_size = sampled_data.batch_size
+            node_idx = sampled_data.node_idx
+            x, edge_index = self.process_graph(sampled_data)
+
+            # Generate noise for constructing fake attribute
+            gaussian_noise = torch.randn(x.shape[0], self.noise_dim).to(
+                self.device)
+
+            # train the model
+            x_, a, a_ = self.model(x, gaussian_noise, edge_index)
+
+            score = self._score_func(x,
+                                    x_,
+                                    a,
+                                    edge_index,
+                                    batch_size)
+            
+            eval_loss = torch.mean(score)                
+            eval_epoch_loss += eval_loss.item() * batch_size
+
+        self.model.train()
+        eval_epoch_loss_avg = eval_epoch_loss/G.x.shape[0]
+        print('Evaluation Loss: ',eval_epoch_loss_avg)
+
+        return eval_epoch_loss_avg
+
 
     def decision_function(self, G):
         """
@@ -234,14 +302,61 @@ class GAAN(BaseDetector):
             The anomaly score of shape :math:`N`.
         """
         check_is_fitted(self, ['model'])
+        G.node_idx = torch.arange(G.x.shape[0])
+        if self.batch_size == 0:
+            self.batch_size = G.x.shape[0]
+        loader = NeighborLoader(G,
+                                [self.num_neigh],
+                                batch_size=self.batch_size)
+        
+        self.model.eval()
+        outlier_scores = np.zeros(G.x.shape[0])
+        for sampled_data in loader:
+            batch_size = sampled_data.batch_size
+            node_idx = sampled_data.node_idx
+            x, edge_index = self.process_graph(sampled_data)
 
-        if G is not None:
-            warnings.warn('The model is transductive only. '
-                          'Training data is used to predict')
+            # Generate noise for constructing fake attribute
+            gaussian_noise = torch.randn(x.shape[0], self.noise_dim).to(
+                self.device)
 
-        outlier_scores = self.decision_scores_
+            # train the model
+            x_, a, a_ = self.model(x, gaussian_noise, edge_index)
+
+            score = self._score_func(x,
+                                    x_,
+                                    a,
+                                    edge_index,
+                                    batch_size)
+            outlier_scores[node_idx[:batch_size]] = score.detach() \
+                        .cpu().numpy()
 
         return outlier_scores
+
+    # def decision_function(self, G):
+    #     """
+    #     Predict raw anomaly score using the fitted detector.
+    #     Outliers are assigned with larger anomaly scores.
+
+    #     Parameters
+    #     ----------
+    #     G : PyTorch Geometric Data instance (torch_geometric.data.Data)
+    #         The input data.
+
+    #     Returns
+    #     -------
+    #     outlier_scores : numpy.ndarray
+    #         The anomaly score of shape :math:`N`.
+    #     """
+    #     check_is_fitted(self, ['model'])
+
+    #     if G is not None:
+    #         warnings.warn('The model is transductive only. '
+    #                       'Training data is used to predict')
+
+    #     outlier_scores = self.decision_scores_
+
+    #     return outlier_scores
 
     def _loss_func_g(self, a_):
         loss_g = F.binary_cross_entropy(a_, torch.ones_like(a_))

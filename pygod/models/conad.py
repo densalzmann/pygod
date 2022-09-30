@@ -17,6 +17,7 @@ from . import BaseDetector
 from .basic_nn import GCN
 from ..metrics import eval_roc_auc
 from ..utils import validate_device
+import mlflow
 
 
 class CONAD(BaseDetector):
@@ -109,6 +110,7 @@ class CONAD(BaseDetector):
                  m=50,
                  k=50,
                  f=10,
+                 mlflow_run_id=None,
                  verbose=False):
         super(CONAD, self).__init__(contamination=contamination)
 
@@ -136,8 +138,10 @@ class CONAD(BaseDetector):
         self.k = k
         self.f = f
         self.model = None
+        self.mlflow_run_id = mlflow_run_id
+        self.last_epoch_loss = -1
 
-    def fit(self, G, y_true=None):
+    def fit(self, G, y_true=None, eval_G=None):
         """
         Fit detector with input data.
 
@@ -214,17 +218,75 @@ class CONAD(BaseDetector):
                 loss.backward()
                 optimizer.step()
 
+            ## Evaluation loss
+            eval_epoch_loss = -1
+            if eval_G != None:
+                eval_epoch_loss = self.evaluating_function(eval_G)
+
             if self.verbose:
                 print("Epoch {:04d}: Loss {:.4f}"
                       .format(epoch, epoch_loss / G.x.shape[0]), end='')
+                with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                    mlflow.log_metric(key="epoch_loss", value=epoch_loss/G.x.shape[0], step=epoch)
+                    if eval_epoch_loss != 1:
+                        mlflow.log_metric(key="eval_epoch_loss", value=eval_epoch_loss, step=epoch)
+
                 if y_true is not None:
                     auc = eval_roc_auc(y_true, decision_scores)
                     print(" | AUC {:.4f}".format(auc), end='')
+                    with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                        mlflow.log_metric(key="auc", value= auc, step=epoch)
                 print()
-
+        
+            self.last_epoch_loss=epoch_loss/G.x.shape[0]
         self.decision_scores_ = decision_scores
         self._process_decision_scores()
         return self
+
+    def evaluating_function(self, G):
+        """
+        Evaluating function
+
+        Parameters
+        ----------
+        eval_G : PyTorch Geometric Data instance (torch_geometric.data.Data)
+            The input data.
+
+        Returns
+        -------
+        eval_epoch_loss_avg : float
+            The evaluation epoch loss.
+        """
+        check_is_fitted(self, ['model'])
+        G.node_idx = torch.arange(G.x.shape[0])
+        G.s = to_dense_adj(G.edge_index)[0]
+
+        loader = NeighborLoader(G,
+                                [self.num_neigh] * self.num_layers,
+                                batch_size=self.batch_size)
+
+        self.model.eval()
+        eval_epoch_loss = 0
+        for sampled_data in loader:
+            batch_size = sampled_data.batch_size
+            node_idx = sampled_data.node_idx
+
+            x, s, edge_index = self.process_graph(sampled_data)
+
+            x_, s_ = self.model(x, edge_index)
+            score = self.loss_func(x[:batch_size],
+                                   x_[:batch_size],
+                                   s[:batch_size],
+                                   s_[:batch_size])
+            
+            eval_loss = torch.mean(score)                
+            eval_epoch_loss += eval_loss.item() * batch_size
+
+        self.model.train()
+        eval_epoch_loss_avg = eval_epoch_loss/G.x.shape[0]
+        print('Evaluation Loss: ',eval_epoch_loss_avg)
+
+        return eval_epoch_loss_avg
 
     def decision_function(self, G):
         """

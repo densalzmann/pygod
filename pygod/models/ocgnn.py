@@ -16,7 +16,7 @@ from . import BaseDetector
 from ..utils import validate_device
 from ..metrics import eval_roc_auc
 from torch_geometric.loader import NeighborLoader
-
+import mlflow
 
 class GCN_base(nn.Module):
     """
@@ -116,6 +116,7 @@ class OCGNN(BaseDetector):
                  verbose=False,
                  act=F.relu,
                  batch_size = 0,
+                 mlflow_run_id=None,
                  num_neigh = -1):
         super(OCGNN, self).__init__(contamination=contamination)
         self.dropout = dropout
@@ -137,6 +138,8 @@ class OCGNN(BaseDetector):
         # other param
         self.verbose = verbose
         self.model = None
+        self.mlflow_run_id = mlflow_run_id
+        self.last_epoch_loss = -1
 
     def init_center(self, x, edge_index):
         """
@@ -304,11 +307,16 @@ class OCGNN(BaseDetector):
             if self.verbose:
                 print("Epoch {:04d}: Loss {:.4f}"
                       .format(cur_epoch,  epoch_loss / G.x.shape[0]), end='')
+                with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                    mlflow.log_metric(key="epoch_loss", value=epoch_loss/G.x.shape[0], step=cur_epoch)
                 if y_true is not None:
                     auc = eval_roc_auc(y_true, decision_scores)
                     print(" | AUC {:.4f}".format(auc), end='')
+                    with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                        mlflow.log_metric(key="auc", value= auc, step=cur_epoch)
                 print()
 
+            self.last_epoch_loss=epoch_loss/G.x.shape[0]
         self.decision_scores_ = decision_scores
         self._process_decision_scores()
         return self

@@ -15,6 +15,7 @@ from torch_geometric.utils import to_scipy_sparse_matrix, to_networkx
 
 from . import BaseDetector
 from ..metrics import eval_roc_auc
+import mlflow
 
 gc.enable()
 
@@ -78,6 +79,7 @@ class ONE(BaseDetector):
                  K=36,
                  iter=5,
                  contamination=0.1,
+                 mlflow_run_id=None,
                  verbose=False):
         super(ONE, self).__init__(contamination=contamination)
 
@@ -86,6 +88,8 @@ class ONE(BaseDetector):
 
         # other param
         self.verbose = verbose
+        self.mlflow_run_id = mlflow_run_id
+        self.last_epoch_loss = -1
 
     def fit(self, G, y_true=None):
         """
@@ -330,11 +334,16 @@ class ONE(BaseDetector):
             if self.verbose:
                 print('Done for outlier score')
                 print('Loop {} ended: \n'.format(opti_iter))
+                with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                    mlflow.log_metric(key="epoch_loss", value=self.calc_lossValues, step=opti_iter)  # type: ignore
+
 
         if self.verbose:
             if y_true is not None:
                 auc = eval_roc_auc(y_true, outl2)
                 print(" | AUC {:.4f}".format(auc), end='')
+                with mlflow.start_run(run_id = self.mlflow_run_id, nested=True):
+                        mlflow.log_param(key="auc", value= auc)
             print()
 
         # Use outl2 as the outlier score.
@@ -342,6 +351,7 @@ class ONE(BaseDetector):
         # "O2 is more important to determine outliers."
         self.decision_scores_ = outl2
         self._process_decision_scores()
+        self.last_epoch_loss=self.calc_lossValues
 
         return self
 
